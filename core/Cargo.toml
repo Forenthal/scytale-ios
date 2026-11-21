@@ -1,0 +1,39 @@
+[package]
+name = "scytale_core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Scytale crypto core (shared with the Windows build): AES-256-GCM, Argon2id, HKDF"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+aes-gcm = { version = "0.10", features = ["stream"] }
+argon2 = { version = "0.5", features = ["zeroize"] }
+hkdf = "0.12"
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+subtle = "2"
+zeroize = { version = "1", features = ["derive"] }
+getrandom = "0.2"
+libc = "0.2"
+data-encoding = "2"
+qrcode = { version = "0.14", default-features = false }
+# Courier (device-to-device messages): hybrid classical + post-quantum.
+x25519-dalek = { version = "=3.0.0", features = ["static_secrets", "zeroize"] }
+ed25519-dalek = { version = "=3.0.0", features = ["zeroize"] }
+ml-kem = { version = "=0.3.4", features = ["zeroize", "getrandom"] }
+ml-dsa = { version = "=0.1.2", features = ["zeroize"] }
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
+codegen-units = 1
+debug = false
+overflow-checks = true
+
+[profile.dev]
+panic = "abort"

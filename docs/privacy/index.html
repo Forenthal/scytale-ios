@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scytale Privacy Policy</title>
+<style>
+  :root { --bg: #0a0c0e; --text: #e1e8e4; --dim: #828e8a; --green: #40dc78; --line: #30383e; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 40px 20px 80px; }
+  h1 { color: var(--green); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .04em; margin-bottom: 4px; }
+  h2 { font-size: 1.05rem; margin-top: 2em; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+  p, li { color: var(--text); }
+  .dim { color: var(--dim); }
+  strong { color: var(--green); font-weight: 600; }
+  code { font-family: ui-monospace, Menlo, monospace; font-size: .92em; }
+</style>
+</head>
+<body>
+<main>
+<h1>SCYTALE</h1>
+<p class="dim">Privacy Policy · Effective 21 November 2026</p>
+
+<h2>Summary</h2>
+<p><strong>Scytale collects no data.</strong> It has no account, no server, no analytics, no advertising and no
+tracking, and it makes no network connections. Everything you put into Scytale stays on your iPhone, encrypted.</p>
+
+<h2>What stays on your device</h2>
+<ul>
+  <li>Files, photos and messages you add are encrypted on your iPhone with AES-256-GCM. Decrypted content is shown
+      in memory only and is never written to storage.</li>
+  <li>The keys that protect your vault are kept on your iPhone: one in the Secure Enclave, released only by Face ID,
+      and others in the iOS Keychain set to "this device only".</li>
+  <li>The vault is excluded from iCloud Backup and from computer backups, and is never synced to iCloud.</li>
+  <li>An on-device audit log records security events (for example logins and lockouts) with their time. It never
+      records file names or content.</li>
+</ul>
+
+<h2>Permissions Scytale asks for</h2>
+<ul>
+  <li><strong>Camera</strong>: to take photos that go straight into the encrypted vault, never into Photos.</li>
+  <li><strong>Face ID</strong>: to release the vault key from the Secure Enclave. Face data is handled by iOS and is
+      never accessible to Scytale.</li>
+  <li><strong>Photos</strong>: only when you ask Scytale to delete the originals of photos it has encrypted.</li>
+  <li><strong>Notifications</strong>: local notifications about logins, created on your iPhone. No push service is used.</li>
+</ul>
+
+<h2>Messages you send to another device</h2>
+<p>Scytale's Courier lets you seal a message for another device you have paired with. Scytale only creates the
+encrypted file or text; <em>you</em> choose how to send it (for example by email), and Scytale does not transmit it.
+The service you use to send it only ever sees encrypted data and handles it under its own privacy policy.</p>
+
+<h2>Information Apple may share</h2>
+<ul>
+  <li>If you have chosen in iOS settings to share analytics with app developers, Apple may provide anonymous crash
+      reports to the developer. Scytale itself sends nothing.</li>
+  <li>During beta testing through TestFlight, Apple shares the name and email address you use for TestFlight, and any
+      feedback you submit, with the developer, under Apple's TestFlight terms.</li>
+</ul>
+
+<h2>Deleting your data</h2>
+<p>All Scytale data is on your iPhone. Delete the app to remove it, or use <em>Panic wipe</em> inside Scytale to
+destroy the vault, its keys and its log immediately. There is no copy anywhere else to delete.</p>
+
+<h2>Children</h2>
+<p>Scytale is not directed at children under 13 and collects no information from anyone.</p>
+
+<h2>Changes</h2>
+<p>If this policy changes, the new version will be published at this address with a new effective date.</p>
+
+<h2>Contact</h2>
+<p>Scytale is developed by Forenthal. Contact: <a href="https://github.com/Forenthal" style="color:#40dc78">github.com/Forenthal</a></p>
+</main>
+</body>
+</html>

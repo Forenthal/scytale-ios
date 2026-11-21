@@ -1,0 +1,4 @@
+module ScytaleCore {
+    header "scytale_core.h"
+    export *
+}

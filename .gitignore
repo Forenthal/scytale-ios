@@ -1,0 +1,6 @@
+/core/target/
+/build/
+/ios/Scytale.xcodeproj/
+DerivedData/
+*.xcresult
+.DS_Store

@@ -1,0 +1,24 @@
+# Daily watchdog for copies of Scytale's code. A failed run means possible copies were found:
+# GitHub emails the repository owner about the failure, and the run summary lists them for review.
+name: provenance-watch
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Search GitHub for the provenance marker
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/provenance-watch.sh

@@ -1,0 +1,64 @@
+# One-off: register the App ID com.forenthal.scytale (no capabilities) and an App Store
+# provisioning profile "Scytale Forenthal" with the existing Apple Distribution certificate.
+# Idempotent: existing ones are reused. Prints ids and names only.
+name: asc-provision
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Register App ID and profile
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          BUNDLE_ID: com.forenthal.scytale
+          PROFILE_NAME: Scytale Forenthal
+        run: |
+          set -euo pipefail
+          JWT=$(bash scripts/asc-jwt.sh)
+          api() { curl -sS -w '\n%{http_code}' -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' "$@"; }
+          body() { sed '$d'; }
+          code() { tail -n1; }
+          A=https://api.appstoreconnect.apple.com/v1
+
+          r=$(api "$A/bundleIds?filter%5Bidentifier%5D=$BUNDLE_ID&filter%5Bplatform%5D=IOS")
+          echo "lookup App ID: HTTP $(echo "$r" | code)"
+          BID=$(echo "$r" | body | python3 -I -c "import json,sys; d=json.load(sys.stdin).get('data',[]); print(next((x['id'] for x in d if x['attributes']['identifier']=='$BUNDLE_ID'),''))")
+          if [ -z "$BID" ]; then
+            r=$(api -X POST "$A/bundleIds" -d "{\"data\":{\"type\":\"bundleIds\",\"attributes\":{\"identifier\":\"$BUNDLE_ID\",\"name\":\"Scytale\",\"platform\":\"IOS\"}}}")
+            echo "create App ID: HTTP $(echo "$r" | code)"
+            echo "$r" | body | python3 -I -c "import json,sys; j=json.load(sys.stdin); [print('  error:', e.get('detail')) for e in j.get('errors',[])]"
+            BID=$(echo "$r" | body | python3 -I -c "import json,sys; print(json.load(sys.stdin).get('data',{}).get('id',''))")
+          fi
+          [ -n "$BID" ] || { echo "App ID not available"; exit 1; }
+          echo "App ID: $BUNDLE_ID ($BID)"
+
+          r=$(api "$A/bundleIds/$BID/bundleIdCapabilities")
+          echo "capabilities on the App ID:"; echo "$r" | body | python3 -I -c "import json,sys; [print('  ', x['attributes']['capabilityType']) for x in json.load(sys.stdin).get('data',[])] or print('   none')"
+
+          r=$(api "$A/certificates?filter%5BcertificateType%5D=DISTRIBUTION")
+          CID=$(echo "$r" | body | python3 -I -c "import json,sys; d=json.load(sys.stdin).get('data',[]); d=sorted(d,key=lambda x:x['attributes'].get('expirationDate',''),reverse=True); print(d[0]['id'] if d else '')")
+          [ -n "$CID" ] || { echo "no Apple Distribution certificate visible to this key"; exit 1; }
+          echo "certificate: $CID"
+
+          r=$(api "$A/profiles?filter%5Bname%5D=$(python3 -I -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$PROFILE_NAME")")
+          PID=$(echo "$r" | body | python3 -I -c "import json,sys; d=json.load(sys.stdin).get('data',[]); print(d[0]['id'] if d else '')")
+          if [ -z "$PID" ]; then
+            r=$(api -X POST "$A/profiles" -d "{\"data\":{\"type\":\"profiles\",\"attributes\":{\"name\":\"$PROFILE_NAME\",\"profileType\":\"IOS_APP_STORE\"},\"relationships\":{\"bundleId\":{\"data\":{\"type\":\"bundleIds\",\"id\":\"$BID\"}},\"certificates\":{\"data\":[{\"type\":\"certificates\",\"id\":\"$CID\"}]}}}}")
+            echo "create profile: HTTP $(echo "$r" | code)"
+            echo "$r" | body | python3 -I -c "import json,sys; j=json.load(sys.stdin); [print('  error:', e.get('detail')) for e in j.get('errors',[])]"
+            PID=$(echo "$r" | body | python3 -I -c "import json,sys; print(json.load(sys.stdin).get('data',{}).get('id',''))")
+          fi
+          [ -n "$PID" ] || { echo "profile not available"; exit 1; }
+          echo "profile: $PROFILE_NAME ($PID)"

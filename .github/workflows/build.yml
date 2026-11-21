@@ -1,0 +1,67 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select newest released Xcode
+        run: bash scripts/select-xcode.sh
+
+      - name: Toolchain versions
+        run: |
+          sw_vers
+          xcodebuild -version
+          rustc --version
+          cargo --version
+
+      - name: Rust iOS targets
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+
+      - name: Core tests (Mac host)
+        working-directory: core
+        run: cargo test --locked --release
+
+      - name: Build core for iOS
+        run: bash scripts/build-core.sh
+
+      - name: Install XcodeGen (pinned, checksum-verified)
+        run: bash scripts/install-xcodegen.sh
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Unit tests on iPhone simulator
+        run: bash scripts/test-sim.sh
+
+  # Known-vulnerability check of every Rust dependency (RustSec advisory database).
+  # Runs on Linux: it needs no Mac, and Linux minutes cost a tenth of macOS minutes.
+  rust-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install cargo-audit (pinned)
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Audit Cargo.lock
+        working-directory: core
+        run: cargo audit --deny warnings

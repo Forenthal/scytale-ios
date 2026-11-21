@@ -1,0 +1,66 @@
+# Read-only: show the latest builds' processing and TestFlight states from App Store Connect.
+# Uses only openssl, curl and python3's standard library (no third-party packages).
+name: asc-status
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Query App Store Connect
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          BUNDLE_ID: "com.forenthal.scytale"
+        run: |
+          set -euo pipefail
+          umask 077
+          KEY="$RUNNER_TEMP/k.p8"
+          printf '%s' "$ASC_KEY_P8" | base64 --decode > "$KEY"
+          b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+          now=$(date +%s)
+          header=$(printf '{"alg":"ES256","kid":"%s","typ":"JWT"}' "$ASC_KEY_ID" | b64url)
+          payload=$(printf '{"iss":"%s","iat":%d,"exp":%d,"aud":"appstoreconnect-v1"}' "$ASC_ISSUER_ID" "$now" "$((now + 600))" | b64url)
+          printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$KEY" -binary > "$RUNNER_TEMP/sig.der"
+          rm -f "$KEY"
+          # DER ECDSA signature -> raw r||s (64 bytes), as JWT ES256 requires
+          sig=$(python3 -I - "$RUNNER_TEMP/sig.der" <<'PY' | b64url
+          import sys
+          d = open(sys.argv[1], 'rb').read()
+          def ints(b):
+              assert b[0] == 0x30
+              i = 2 if b[1] < 0x80 else 2 + (b[1] & 0x7f)
+              out = []
+              while i < len(b):
+                  assert b[i] == 0x02
+                  n = b[i + 1]
+                  out.append(int.from_bytes(b[i + 2:i + 2 + n], 'big'))
+                  i += 2 + n
+              return out
+          r, s = ints(d)
+          sys.stdout.buffer.write(r.to_bytes(32, 'big') + s.to_bytes(32, 'big'))
+          PY
+          )
+          rm -f "$RUNNER_TEMP/sig.der"
+          jwt="$header.$payload.$sig"
+          APP_ID=$(curl -sS --fail-with-body -H "Authorization: Bearer $jwt" "https://api.appstoreconnect.apple.com/v1/apps?filter%5BbundleId%5D=$BUNDLE_ID&fields%5Bapps%5D=bundleId" | python3 -I -c "import json,sys; d=json.load(sys.stdin)['data']; print(d[0]['id'] if d else '')")
+          [ -n "$APP_ID" ] || { echo "no App Store Connect app with bundle ID $BUNDLE_ID yet"; exit 0; }
+          echo "app $APP_ID ($BUNDLE_ID)"
+          url="https://api.appstoreconnect.apple.com/v1/builds?filter%5Bapp%5D=$APP_ID&sort=-uploadedDate&limit=4&include=buildBetaDetail&fields%5Bbuilds%5D=version,processingState,uploadedDate,expired,buildBetaDetail&fields%5BbuildBetaDetails%5D=internalBuildState,externalBuildState"
+          curl -sS --fail-with-body -H "Authorization: Bearer $jwt" "$url" > "$RUNNER_TEMP/b.json"
+          python3 -I - "$RUNNER_TEMP/b.json" <<'PY'
+          import json, sys
+          j = json.load(open(sys.argv[1]))
+          beta = {x['id']: x['attributes'] for x in j.get('included', []) if x['type'] == 'buildBetaDetails'}
+          for b in j['data']:
+              a = b['attributes']
+              d = beta.get(b['relationships']['buildBetaDetail']['data']['id'], {})
+              print(f"build {a['version']:>4}  processing={a['processingState']:<12} internal={d.get('internalBuildState')}  external={d.get('externalBuildState')}  uploaded={a['uploadedDate']}")
+          PY

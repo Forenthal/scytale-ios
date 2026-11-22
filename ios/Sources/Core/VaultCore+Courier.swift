@@ -59,18 +59,36 @@ extension VaultCore {
         return (0, courierOut(n))
     }
 
-    /// After `reauth`. Returns the code, the sender's destroy flag and the text (locked memory).
-    func courierReceive(_ d: Data) -> (code: Int32, burn: Bool, text: Data?) {
-        var burn: Int32 = 0
+    /// After `reauth`. Seals vault file `id` (decrypted in the core's locked memory, then wiped).
+    /// Returns the raw .scy envelope (ciphertext), or an error code.
+    func courierSendFile(_ id: Data) -> (code: Int32, out: Data?) {
+        let n = id.withUnsafeBytes { scy_courier_send_file(rawCore, $0.bindMemory(to: UInt8.self).baseAddress) }
+        guard n > 0 else { return (-n, nil) }
+        return (0, courierOut(n))
+    }
+
+    /// Whether a file name is a photo or other image (those cannot be sent).
+    static func isImageName(_ name: String) -> Bool {
+        let n = Array(name.utf8)
+        return n.withUnsafeBufferPointer { scy_courier_is_image_name($0.baseAddress, $0.count) } == 1
+    }
+
+    enum Arrived: Int32 { case keptMessage = 0, burnMessage = 1, file = 2 }
+
+    /// After `reauth`. Returns the code, what arrived, and for a message its text (locked
+    /// memory). A file is already encrypted into the vault and its content never reaches Swift.
+    func courierReceive(_ d: Data) -> (code: Int32, kind: Arrived, text: Data?) {
+        var kind: Int32 = 0
         var len = 0
         let rc = d.withUnsafeBytes { b in
-            scy_courier_receive(rawCore, b.bindMemory(to: UInt8.self).baseAddress, b.count, &burn, &len)
+            scy_courier_receive(rawCore, b.bindMemory(to: UInt8.self).baseAddress, b.count, &kind, &len)
         }
-        guard rc == 0 else { return (rc, false, nil) }
+        guard rc == 0, let arrived = Arrived(rawValue: kind) else { return (rc == 0 ? -1 : rc, .keptMessage, nil) }
+        if arrived == .file { return (0, .file, nil) }
         defer { scy_view_close(rawCore) }
         let text = SecureMemory.data(count: len) { p in
             scy_view_copy(rawCore, p.assumingMemoryBound(to: UInt8.self), len) == Int32(len)
         }
-        return (0, burn == 1, text)
+        return (0, arrived, text)
     }
 }

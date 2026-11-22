@@ -755,19 +755,46 @@ pub unsafe extern "C" fn scy_courier_out_copy(c: *mut ScyCore, out: *mut u8, cap
     unsafe { copy_out(c.courier_out(), out, cap) }
 }
 
-/// Open a message (after scy_reauth). 0 ok (text in the view buffer: scy_view_copy, then
-/// scy_view_close; *burn = sender's destroy flag), else an error code (negative = local error,
-/// positive = courier error).
+/// Seal vault file `id` for the paired device (after scy_reauth) into the output buffer (raw
+/// .scy bytes). Returns the length, or a negative error code: -1..-13 courier error, -101 vault
+/// locked, -102 courier state unreadable, -103 write failed, -104 not re-authenticated, -105 not
+/// a file, -106 file failed its integrity check.
+/// # Safety
+/// See module docs; `id` has 16 bytes.
+#[no_mangle]
+pub unsafe extern "C" fn scy_courier_send_file(c: *mut ScyCore, id: *const u8) -> i32 {
+    let Some(c) = (unsafe { core(c) }) else { return -101 };
+    let Some(id) = (unsafe { id16(id) }) else { return -105 };
+    match c.courier_send_file(id) {
+        Ok(n) => i32::try_from(n).unwrap_or(-103),
+        Err(e) if e > 0 => -e,
+        Err(e) => -(100 + e.abs()),
+    }
+}
+
+/// 1 if `name` is a photo or other image by its extension (cannot be sent), else 0.
+/// # Safety
+/// See module docs; `name` has `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn scy_courier_is_image_name(name: *const u8, len: usize) -> i32 {
+    let Some(n) = (unsafe { bytes(name, len) }) else { return 0 };
+    std::str::from_utf8(n).map_or(0, |s| i32::from(crate::courier::is_image(s, &[])))
+}
+
+/// Open a courier envelope (after scy_reauth). 0 ok, else an error code (negative = local error,
+/// positive = courier error). *kind: 0 kept message, 1 destroy-on-receipt message (for both the
+/// text is in the view buffer: scy_view_copy, then scy_view_close), 2 file (stored in the vault;
+/// nothing in the view buffer).
 /// # Safety
 /// See module docs; `data` has `len` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn scy_courier_receive(c: *mut ScyCore, data: *const u8, len: usize, burn: *mut i32, out_len: *mut usize) -> i32 {
+pub unsafe extern "C" fn scy_courier_receive(c: *mut ScyCore, data: *const u8, len: usize, kind: *mut i32, out_len: *mut usize) -> i32 {
     let (Some(c), Some(d)) = (unsafe { core(c) }, unsafe { bytes(data, len) }) else { return -1 };
     match c.courier_receive(d) {
         Ok(b) => {
             unsafe {
-                if let Some(x) = burn.as_mut() {
-                    *x = i32::from(b);
+                if let Some(x) = kind.as_mut() {
+                    *x = b as i32;
                 }
                 if let Some(l) = out_len.as_mut() {
                     *l = c.view_bytes().map_or(0, |v| v.len());

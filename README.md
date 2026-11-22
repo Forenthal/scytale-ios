@@ -38,7 +38,7 @@ source. Steps 1 and 3 are how you check the build you actually installed.
 | Viewing | Decrypted only into locked memory, wiped on *Re-encrypt*; no export, copy or share out of the vault |
 | Screen | Content excluded from screenshots and recordings; screen recording locks the vault |
 | Audit | HMAC-chained log of security events (never names or content); tampering is detected |
-| Courier | Messages between paired devices: X25519 + ML-KEM-768 (post-quantum) key agreement, Ed25519 + ML-DSA-65 signatures, AES-256-GCM; one-time keys deleted on opening, so copies left in email can never be decrypted |
+| Courier | Messages and files (not photos, up to 12 MiB) between paired devices: X25519 + ML-KEM-768 (post-quantum) key agreement, Ed25519 + ML-DSA-65 signatures, AES-256-GCM; one-time keys deleted on opening, so copies left in email can never be decrypted; file names are sealed inside, sizes padded to five classes, and received files go straight into the vault |
 | Integrity | Refuses to run with a debugger, on a jailbroken phone, with injected hooking code, or when re-signed by anyone but Forenthal |
 
 Cryptography comes from audited RustCrypto and dalek libraries; nothing is hand-rolled.

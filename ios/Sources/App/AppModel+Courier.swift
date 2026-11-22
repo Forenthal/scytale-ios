@@ -16,7 +16,14 @@ extension AppModel {
         case 9: return "Message empty or over 16 KiB."
         case 10: return "Another device is already paired. Unpair first."
         case 11: return "That is this device's own key bundle."
-        case -4: return "Re-authentication required."
+        case 12: return "Photos and other images cannot be sent."
+        case 13: return "File empty or over 12 MiB."
+        case 101: return "Vault locked."
+        case 102: return "Courier state could not be read."
+        case 103: return "Could not save."
+        case -4, 104: return "Re-authentication required."
+        case 105: return "Only files can be sent."
+        case 106: return "File failed its integrity check. Not sent."
         default: return "Courier error \(code)."
         }
     }
@@ -69,9 +76,11 @@ extension AppModel {
         return .text(String(decoding: out, as: UTF8.self))
     }
 
-    /// Face ID, then open a courier file or pasted text. Burn messages are shown once and never
-    /// stored; others are also kept in the vault as a text file.
-    func courierReceive(_ data: Data, done: @escaping (String?) -> Void) {
+    /// Face ID (unless configured once per session), then `work` on the core queue. `done` gets
+    /// the work's result, or a message if re-authentication failed. Repeated Face ID failures
+    /// lock the vault and `done` is not called.
+    private func courierReauth<T>(_ reason: String, work: @escaping (VaultCore) -> T,
+                                  done: @escaping (T?, String?) -> Void) {
         guard let core, busy == nil, let wrapped = core.run({ $0.wrappedPepper() }) else { return }
         busy = "Verifying…"
         let generation = lockGeneration
@@ -83,7 +92,7 @@ extension AppModel {
                 reauth = (0, 0)  // configured: Face ID once per session, already given
             } else {
                 do {
-                    try DeviceKey.vault.unwrap(wrapped, reason: "Open a courier message") { p in
+                    try DeviceKey.vault.unwrap(wrapped, reason: reason) { p in
                         reauth = core.reauth(pepper: p)
                     }
                 } catch let f as DeviceKey.Failure {
@@ -92,32 +101,72 @@ extension AppModel {
                     failure = .failed(-1)
                 }
             }
-            var got: (code: Int32, burn: Bool, text: Data?)?
-            if reauth?.code == 0 { got = core.courierReceive(data) }
+            var result: T?
+            if failure == nil, reauth?.code == 0 { result = work(core) }
             DispatchQueue.main.async {
                 self.busy = nil
                 guard generation == self.lockGeneration else { return }
                 self.touch()
-                if let failure { done(Self.message(for: failure)); return }
+                if let failure { done(nil, Self.message(for: failure)); return }
                 switch reauth?.code {
-                case 0:
-                    guard let got, got.code == 0, let text = got.text else {
-                        done(Self.courierMessage(got?.code ?? -1))
-                        return
-                    }
-                    self.openMessage = MessageContent(text: String(decoding: text, as: UTF8.self), lifetime: TimeInterval(self.config.messageMin * 60))
-                    self.reloadItems()
-                    self.vaultNote = got.burn
-                        ? ("Received · destroy-on-receipt · not stored", .ok)
-                        : ("Received · saved in vault as a text file", .ok)
-                    done(nil)
-                case 1: done("Face ID: no match. \(reauth?.aux ?? 0) attempt(s) before lockout.")
+                case 0: done(result, result == nil ? "Re-authentication failed." : nil)
+                case 1: done(nil, "Face ID: no match. \(reauth?.aux ?? 0) attempt(s) before lockout.")
                 case 2:
                     self.lock(.logout)
                     self.show("Locked: repeated Face ID failures.", warn: true)
-                default: done("Re-authentication failed.")
+                default: done(nil, "Re-authentication failed.")
                 }
             }
+        }
+    }
+
+    /// Face ID, then open a courier file or pasted text. Burn messages are shown once and never
+    /// stored; others are also kept in the vault as a text file. A received file is encrypted
+    /// into the vault by the core and never shown or handed to Swift.
+    func courierReceive(_ data: Data, done: @escaping (String?) -> Void) {
+        courierReauth("Open a courier message", work: { $0.courierReceive(data) }) { got, failure in
+            if let failure { done(failure); return }
+            guard let got, got.code == 0 else {
+                done(Self.courierMessage(got?.code ?? -1))
+                return
+            }
+            self.reloadItems()
+            switch got.kind {
+            case .file:
+                self.vaultNote = ("File received · encrypted into the vault", .ok)
+            case .burnMessage, .keptMessage:
+                guard let text = got.text else { done(Self.courierMessage(-1)); return }
+                self.openMessage = MessageContent(text: String(decoding: text, as: UTF8.self), lifetime: TimeInterval(self.config.messageMin * 60))
+                self.vaultNote = got.kind == .burnMessage
+                    ? ("Received · destroy-on-receipt · not stored", .ok)
+                    : ("Received · saved in vault as a text file", .ok)
+            }
+            done(nil)
+        }
+    }
+
+    /// Whether a vault item can be sent to the paired device: a file, not a photo or other
+    /// image, within the courier's size limit. (The core checks again, by content too.)
+    func courierCanSend(_ item: VaultItem) -> Bool {
+        !item.isMessage && item.size > 0 && item.size <= Self.courierFileCap && !VaultCore.isImageName(item.name)
+    }
+
+    static let courierFileCap: UInt64 = 12 * 1024 * 1024
+
+    /// Face ID, then seal a vault file for the paired device as a .scy file (ciphertext only, in
+    /// the temporary outgoing folder for Save to Files or the share sheet).
+    func courierSendFile(_ item: VaultItem, done: @escaping (SealedOutput) -> Void) {
+        courierReauth("Send a file to the paired device", work: { $0.courierSendFile(item.id) }) { r, failure in
+            if let failure { done(.failed(failure)); return }
+            guard let r, r.code == 0, let out = r.out else {
+                done(.failed(Self.courierMessage(r?.code ?? -1)))
+                return
+            }
+            guard let url = Self.writeOutgoing(out, name: "Scytale file \(Self.fileStamp()).scy") else {
+                done(.failed("Could not write the file."))
+                return
+            }
+            done(.file(url))
         }
     }
 

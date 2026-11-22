@@ -194,6 +194,7 @@ struct CourierView: View {
             .font(Theme.small)
             .foregroundStyle(Theme.green)
             .disabled(model.busy != nil)
+            Note(text: "Received files go straight into the vault. To send one, open it in the vault › Send.")
         }
     }
 
@@ -305,7 +306,8 @@ struct CourierView: View {
         NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &err) { u in
             out = try? Data(contentsOf: u, options: [.mappedIfSafe])
         }
-        guard let d = out, d.count <= 4 * 1024 * 1024 else { return nil }
+        // a sealed file is at most 12 MiB + padding and headers; key bundles and messages are far smaller
+        guard let d = out, d.count <= 17 * 1024 * 1024 else { return nil }
         return d
     }
 }

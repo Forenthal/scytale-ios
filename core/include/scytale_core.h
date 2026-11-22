@@ -105,7 +105,10 @@ int32_t scy_courier_verify(ScyCore *c);
 int32_t scy_courier_unpair(ScyCore *c);
 int32_t scy_courier_send(ScyCore *c, const uint8_t *text, size_t len, int32_t burn, int32_t armored); /* length or -error */
 int32_t scy_courier_out_copy(ScyCore *c, uint8_t *out, size_t cap);
-int32_t scy_courier_receive(ScyCore *c, const uint8_t *data, size_t len, int32_t *burn, size_t *out_len);
+int32_t scy_courier_send_file(ScyCore *c, const uint8_t *id);           /* after scy_reauth; length or -error */
+int32_t scy_courier_is_image_name(const uint8_t *name, size_t len);      /* 1 = photo/image: cannot be sent */
+/* kind: 0 kept message, 1 destroy-on-receipt message (text in the view buffer), 2 file (stored in the vault) */
+int32_t scy_courier_receive(ScyCore *c, const uint8_t *data, size_t len, int32_t *kind, size_t *out_len);
 
 /* ---- configuration (8 bytes: flags, timeout min, message min, originals policy) ----
  * flags bit0 custom (0 = hardened defaults), bit1 no lock on leave, bit2 code optional,

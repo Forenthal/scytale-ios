@@ -14,6 +14,9 @@
 //!   the moment the message opens. Every copy left in email is then undecryptable by anyone.
 //! - The sender's rules (destroy-on-receipt) and a message id are sealed inside the ciphertext.
 //!   Replays are refused. Plaintext is padded to fixed sizes so length is not revealed.
+//! - Files (not photos or other images) travel in the same envelope as a second payload type:
+//!   the file name is sealed inside with the content, padded to one of five size classes, and
+//!   images are refused on both sides.
 
 use aes_gcm::{
     aead::{generic_array::GenericArray, Aead, KeyInit as _, Payload},
@@ -51,6 +54,15 @@ const CONSUMED_CAP: usize = 4096;
 pub const TEXT_CAP: usize = 16 * 1024;
 /// Plaintext (header + text + padding) is padded up to one of these sizes.
 const BUCKETS: [usize; 3] = [1024, 4096, 17 * 1024];
+/// Largest file that can be sent. Padded, sealed and carried as an email attachment (which adds
+/// about a third for encoding), it stays under the common 20 MB attachment limit.
+pub const FILE_CAP: usize = 12 * 1024 * 1024;
+/// Sealed file names are cut to this many bytes.
+pub const NAME_CAP: usize = 255;
+/// File plaintext is padded up to one of these sizes: only the size class is visible.
+const FILE_BUCKETS: [usize; 5] = [64 << 10, 256 << 10, 1 << 20, 4 << 20, FILE_CAP + 1024];
+const PAYLOAD_TEXT: u8 = 1;
+const PAYLOAD_FILE: u8 = 2;
 
 pub type Res<T> = Result<T, Error>;
 
@@ -78,6 +90,10 @@ pub enum Error {
     DifferentPeer = 10,
     /// The bundle is this device's own.
     OwnBundle = 11,
+    /// Photos and other images cannot be sent.
+    Photo = 12,
+    /// File empty or larger than `FILE_CAP`.
+    FileTooLarge = 13,
 }
 
 // ---------------------------------------------------------------- keys
@@ -360,9 +376,12 @@ pub struct State {
 
 #[allow(dead_code)]
 pub struct Received {
+    /// The message text, or the file's content.
     pub text: Zeroizing<Vec<u8>>,
     pub burn: bool,
     pub created: u64,
+    /// Set for a file: its (sanitised) name. Files are never destroy-on-receipt.
+    pub file_name: Option<String>,
 }
 
 impl State {
@@ -447,6 +466,23 @@ impl State {
         if text.is_empty() || text.len() > TEXT_CAP {
             return Err(Error::TooLong);
         }
+        self.seal_payload(|id| pad_payload(text, burn, id, now))
+    }
+
+    /// Seal a file (not a photo or other image) for the paired device. Same envelope, keys and
+    /// rules as `seal`; the name travels sealed inside. Files are always kept by the recipient.
+    pub fn seal_file(&mut self, name: &str, data: &[u8], now: u64) -> Res<Vec<u8>> {
+        if data.is_empty() || data.len() > FILE_CAP {
+            return Err(Error::FileTooLarge);
+        }
+        let name = clean_name(name);
+        if is_image(&name, data) {
+            return Err(Error::Photo);
+        }
+        self.seal_payload(|id| pad_file(&name, data, id, now))
+    }
+
+    fn seal_payload(&mut self, build: impl FnOnce(&[u8; 16]) -> Zeroizing<Vec<u8>>) -> Res<Vec<u8>> {
         let own = self.own_public();
         let peer = self.peer.as_mut().ok_or(Error::NotPaired)?;
         if !peer.verified {
@@ -484,7 +520,7 @@ impl State {
 
         let mut msg_id = [0u8; 16];
         random_bytes(&mut msg_id);
-        let plain = pad_payload(text, burn, &msg_id, now);
+        let plain = build(&msg_id);
         let ct = Aes256Gcm::new(GenericArray::from_slice(&key[..]))
             .encrypt(GenericArray::from_slice(&nonce), Payload { msg: &plain, aad: &header })
             .map_err(|_| Error::Decrypt)?;
@@ -548,9 +584,13 @@ impl State {
                 .decrypt(GenericArray::from_slice(&nonce), Payload { msg: ct, aad: header })
                 .map_err(|_| Error::Decrypt)?,
         );
-        let (text, burn, msg_id, created) = unpad_payload(&plain)?;
+        let (text, burn, msg_id, created, file_name) = unpad_payload(&plain)?;
         if self.consumed.contains(&msg_id) {
             return Err(Error::AlreadyOpened);
+        }
+        // The sender's Scytale refuses images; refuse them here too, before anything is consumed.
+        if file_name.as_deref().is_some_and(|n| is_image(n, &text)) {
+            return Err(Error::Photo);
         }
         // Forward secrecy: the one-time key is destroyed now; no copy of this message can ever be
         // decrypted again.
@@ -559,7 +599,7 @@ impl State {
         if self.consumed.len() > CONSUMED_CAP {
             self.consumed.remove(0);
         }
-        Ok(Received { text, burn, created })
+        Ok(Received { text, burn, created, file_name })
     }
 
     // ---- persistence (sealed by the caller with a vault-derived key)
@@ -659,35 +699,135 @@ fn message_key(dh: &[u8; 32], kem: &[u8], header: &[u8]) -> Zeroizing<[u8; 32]> 
 
 /// version | flags | msg id | created | text length | text | zero padding to a bucket size.
 fn pad_payload(text: &[u8], burn: bool, id: &[u8; 16], now: u64) -> Zeroizing<Vec<u8>> {
-    let mut v = Zeroizing::new(Vec::new());
-    v.push(1);
+    let len = 1 + 1 + 16 + 8 + 4 + text.len();
+    let target = BUCKETS.iter().copied().find(|&b| b >= len).unwrap_or(len);
+    // allocated once at full size, so no unwiped copy is left behind by a reallocation
+    let mut v = Zeroizing::new(Vec::with_capacity(target));
+    v.push(PAYLOAD_TEXT);
     v.push(u8::from(burn));
     v.extend_from_slice(id);
     v.extend_from_slice(&now.to_le_bytes());
     v.extend_from_slice(&(text.len() as u32).to_le_bytes());
     v.extend_from_slice(text);
-    let target = BUCKETS.iter().copied().find(|&b| b >= v.len()).unwrap_or(v.len());
     v.resize(target, 0);
     v
 }
 
-fn unpad_payload(p: &[u8]) -> Res<(Zeroizing<Vec<u8>>, bool, [u8; 16], u64)> {
+/// version 2 | flags (0) | msg id | created | name length | name | data length | data | padding.
+fn pad_file(name: &str, data: &[u8], id: &[u8; 16], now: u64) -> Zeroizing<Vec<u8>> {
+    let len = 1 + 1 + 16 + 8 + 2 + name.len() + 4 + data.len();
+    let target = FILE_BUCKETS.iter().copied().find(|&b| b >= len).unwrap_or(len);
+    let mut v = Zeroizing::new(Vec::with_capacity(target));
+    v.push(PAYLOAD_FILE);
+    v.push(0);
+    v.extend_from_slice(id);
+    v.extend_from_slice(&now.to_le_bytes());
+    v.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    v.extend_from_slice(name.as_bytes());
+    v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    v.extend_from_slice(data);
+    v.resize(target, 0);
+    v
+}
+
+type Unpadded = (Zeroizing<Vec<u8>>, bool, [u8; 16], u64, Option<String>);
+
+fn unpad_payload(p: &[u8]) -> Res<Unpadded> {
     let mut r = Reader::new(p);
-    if r.take(1)?[0] != 1 {
+    let kind = r.take(1)?[0];
+    if kind != PAYLOAD_TEXT && kind != PAYLOAD_FILE {
         return Err(Error::Malformed);
     }
     let flags = r.take(1)?[0];
     let id: [u8; 16] = r.arr()?;
     let created = r.u64()?;
+    let name = if kind == PAYLOAD_FILE {
+        let n = r.u16()? as usize;
+        let raw = std::str::from_utf8(r.take(n)?).map_err(|_| Error::Malformed)?;
+        // only names this code would have produced: no paths, no control characters
+        if flags != 0 || n == 0 || n > NAME_CAP || clean_name(raw) != raw {
+            return Err(Error::Malformed);
+        }
+        Some(raw.to_string())
+    } else {
+        None
+    };
     let n = r.u32()? as usize;
-    if n > TEXT_CAP {
+    let cap = if name.is_some() { FILE_CAP } else { TEXT_CAP };
+    if n > cap || (name.is_some() && n == 0) {
         return Err(Error::Malformed);
     }
     let text = Zeroizing::new(r.take(n)?.to_vec());
     if r.rest().iter().any(|&b| b != 0) {
         return Err(Error::Malformed);
     }
-    Ok((text, flags & 1 == 1, id, created))
+    Ok((text, flags & 1 == 1, id, created, name))
+}
+
+/// A file name safe to show and store: the last path component only, no control or
+/// direction-override characters, trimmed, at most `NAME_CAP` bytes. Never empty.
+pub fn clean_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("");
+    let mut out: String = base
+        .chars()
+        .filter(|c| !c.is_control() && !matches!(*c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}'))
+        .collect();
+    out = out.trim().trim_start_matches('.').trim().to_string();
+    if out.len() > NAME_CAP {
+        let mut cut = NAME_CAP;
+        while !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.truncate(cut);
+        out = out.trim_end().to_string();
+    }
+    if out.is_empty() {
+        out.push_str("file");
+    }
+    out
+}
+
+/// Photos and other images, recognised by their content (any name) or by an image extension.
+pub fn is_image(name: &str, data: &[u8]) -> bool {
+    const EXT: &[&str] = &[
+        "jpg", "jpeg", "jpe", "jfif", "png", "apng", "gif", "webp", "heic", "heif", "hif", "avif", "bmp", "dib",
+        "tif", "tiff", "dng", "jxl", "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "orf", "rw2", "raf",
+        "srw", "pef", "raw", "rwl", "3fr", "erf", "kdc", "mrw", "x3f", "psd", "ico", "jp2", "j2k", "jxr", "wdp",
+    ];
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    if ext.as_deref().is_some_and(|e| EXT.contains(&e)) {
+        return true;
+    }
+    let d = data;
+    let at = |i: usize, m: &[u8]| d.get(i..i + m.len()) == Some(m);
+    if at(0, &[0xFF, 0xD8, 0xFF])                       // JPEG
+        || at(0, b"\x89PNG\r\n\x1a\n")                  // PNG
+        || at(0, b"GIF87a") || at(0, b"GIF89a")         // GIF
+        || (at(0, b"RIFF") && at(8, b"WEBP"))           // WebP
+        || at(0, b"II*\0") || at(0, b"MM\0*")           // TIFF and TIFF-based camera RAW (DNG, NEF, CR2, ARW…)
+        || at(0, b"IIRO") || at(0, b"IIRS") || at(0, b"MMOR") || at(0, b"IIU\0") // Olympus, Panasonic RAW
+        || at(0, b"FUJIFILMCCD-RAW")                    // Fujifilm RAW
+        || at(0, &[0xFF, 0x0A]) || at(0, b"\0\0\0\x0cJXL \r\n\x87\n") // JPEG XL
+        || at(0, b"\0\0\0\x0cjP  \r\n\x87\n") || at(0, &[0xFF, 0x4F, 0xFF, 0x51]) // JPEG 2000
+        || at(0, b"8BPS")                               // Photoshop
+        || (at(0, b"BM") && d.len() >= 26 && at(6, &[0, 0, 0, 0]))  // BMP (reserved bytes zero)
+    {
+        return true;
+    }
+    // ISO media (HEIC, HEIF, AVIF, Canon CR3): an image brand among the major or compatible brands
+    if at(4, b"ftyp") {
+        const BRANDS: &[&[u8; 4]] = &[b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"hevm", b"hevs", b"mif1", b"mif2", b"msf1", b"avif", b"avis", b"crx "];
+        let size = u32::from_be_bytes(d[0..4].try_into().unwrap()) as usize;
+        let end = size.clamp(16, 256).min(d.len());
+        let mut i = 8;
+        while i + 4 <= end {
+            if i != 12 && BRANDS.iter().any(|b| &d[i..i + 4] == *b) {
+                return true;
+            }
+            i += 4;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -808,6 +948,68 @@ mod tests {
         let env = a.seal(b"hello", false, 1).unwrap();
         assert_eq!(b.import_bundle(armor_message(&env).as_bytes()).err(), Some(Error::Malformed));
         assert_eq!(b.open(a.export_bundle(2).as_bytes()).err(), Some(Error::Malformed));
+    }
+
+    #[test]
+    fn files_round_trip_and_keep_their_name() {
+        let (mut pc, mut phone) = paired();
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i * 7 + 3) as u8).collect();
+        let env = pc.seal_file("C:\\Users\\me\\Desktop\\Q3 report.pdf", &data, 77).unwrap();
+        let got = phone.open(&env).unwrap();
+        assert_eq!(got.file_name.as_deref(), Some("Q3 report.pdf"), "path stripped, name kept");
+        assert_eq!(&got.text[..], &data[..]);
+        assert!(!got.burn);
+        assert_eq!(got.created, 77);
+        assert_eq!(phone.open(&env).err(), Some(Error::AlreadyOpened), "forward secrecy applies to files");
+        // messages still arrive as messages
+        let m = phone.seal(b"got it", false, 1).unwrap();
+        assert!(pc.open(&m).unwrap().file_name.is_none());
+        // the file's name is sealed: it does not appear in the envelope
+        let env = pc.seal_file("very-secret-name.docx", b"x", 1).unwrap();
+        assert!(!env.windows(16).any(|w| w == b"very-secret-name"));
+    }
+
+    #[test]
+    fn photos_are_refused_by_content_and_by_name() {
+        let (mut pc, mut phone) = paired();
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F', b'I', b'F'];
+        let mut heic = b"\0\0\0\x18ftypmif1\0\0\0\0mif1heic".to_vec();
+        heic.extend_from_slice(&[0u8; 40]);
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&[0u8; 30]);
+        for (name, data) in [("notes.txt", &jpeg[..]), ("a.bin", &heic[..]), ("renamed.pdf", &png[..]), ("IMG_0001.HEIC", b"anything")] {
+            assert_eq!(pc.seal_file(name, data, 1).err(), Some(Error::Photo), "{name}");
+        }
+        assert_eq!(pc.peer_prekeys_left(), PREKEY_BATCH, "a refused photo spends no one-time key");
+        // ordinary files pass, including text that starts with "BM"
+        for (name, data) in [("a.pdf", &b"%PDF-1.7"[..]), ("b.txt", b"BMW service notes"), ("c.zip", b"PK\x03\x04"), ("d", b"\0\0\0\x18ftypisom")] {
+            assert!(pc.seal_file(name, data, 1).is_ok(), "{name}");
+        }
+        // a modified sender that skips its own check still cannot deliver an image: the receiver
+        // refuses it, and the one-time key is not spent
+        let env = pc.seal_payload(|id| pad_file("x.dat", &jpeg, id, 1)).unwrap();
+        let before = phone.own_prekeys_unused();
+        assert_eq!(phone.open(&env).err(), Some(Error::Photo));
+        assert_eq!(phone.own_prekeys_unused(), before);
+    }
+
+    #[test]
+    fn file_limits_names_and_padding() {
+        let (mut pc, _) = paired();
+        assert_eq!(pc.seal_file("e.bin", b"", 1).err(), Some(Error::FileTooLarge));
+        assert_eq!(pc.seal_file("big.bin", &vec![1u8; FILE_CAP + 1], 1).err(), Some(Error::FileTooLarge));
+        assert!(pc.seal_file("max.bin", &vec![1u8; FILE_CAP], 1).is_ok());
+        let a = pc.seal_file("a.bin", &[1u8; 100], 1).unwrap();
+        let b = pc.seal_file("b.bin", &[1u8; 60_000], 1).unwrap();
+        assert_eq!(a.len(), b.len(), "100 bytes and 60 KB are in the same size class");
+        assert_eq!(clean_name("../../etc/passwd"), "passwd");
+        assert_eq!(clean_name("..\\.."), "file");
+        assert_eq!(clean_name(" .hidden "), "hidden");
+        assert_eq!(clean_name("evil\u{202e}txt.exe"), "eviltxt.exe");
+        assert_eq!(clean_name("a\nb\r.txt"), "ab.txt");
+        let long = "é".repeat(200);
+        let c = clean_name(&long);
+        assert!(c.len() <= NAME_CAP && clean_name(&c) == c);
     }
 
     #[test]

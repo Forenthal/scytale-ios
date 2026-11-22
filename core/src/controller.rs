@@ -191,6 +191,17 @@ pub enum ReauthOutcome {
     NoSession,
 }
 
+/// What an opened courier envelope was.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Received {
+    /// A message, also kept in the vault; its text is in the view buffer.
+    KeptMessage = 0,
+    /// A destroy-on-receipt message; its text is in the view buffer, nothing is stored.
+    BurnMessage = 1,
+    /// A file, encrypted into the vault; nothing is in the view buffer.
+    File = 2,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ViewErr {
     NotAuthorised = 1,
@@ -1044,6 +1055,44 @@ impl Core {
         Ok(self.courier_out.len())
     }
 
+    /// Seal a vault file (not a photo or other image) for the paired device. Needs
+    /// re-authentication, like Decrypt: the file is decrypted into locked memory, sealed, and
+    /// wiped. The used one-time key is recorded on disk before the envelope is released.
+    /// Output: raw .scy bytes (files are too large for an email body).
+    pub fn courier_send_file(&mut self, id: &[u8; 16]) -> Result<usize, i32> {
+        let authorised = self.take_authorisation();
+        let sess = self.sess.as_ref().ok_or(-1)?;
+        if !authorised {
+            return Err(-4);
+        }
+        let item = sess.get(id).ok_or(-5)?.clone();
+        if item.kind != crate::vault::Kind::File {
+            return Err(-5);
+        }
+        if item.size == 0 || item.size > crate::courier::FILE_CAP as u64 {
+            return Err(crate::courier::Error::FileTooLarge as i32);
+        }
+        // refuse photos by name before anything is decrypted
+        if crate::courier::is_image(&item.name, &[]) {
+            return Err(crate::courier::Error::Photo as i32);
+        }
+        let plain = match self.vault.open_file(sess, &item) {
+            Ok(b) => b,
+            Err(_) => {
+                self.audit(ev::FILE_DEC_FAIL);
+                return Err(-6);
+            }
+        };
+        self.audit(ev::FILE_DEC);
+        let sealed = self.courier()?.seal_file(&item.name, plain.as_bytes(), unix_now());
+        drop(plain); // wiped
+        let env = sealed.map_err(|e| e as i32)?;
+        self.courier_save()?;
+        self.audit(ev::COURIER_SEND_FILE);
+        self.courier_out = env;
+        Ok(self.courier_out.len())
+    }
+
     pub fn courier_out(&self) -> &[u8] {
         &self.courier_out
     }
@@ -1051,8 +1100,8 @@ impl Core {
     /// Open a message from the paired device (needs re-authentication). Its one-time key is
     /// destroyed and saved before the text is made available (in the view buffer). If the sender
     /// did not ask for destruction, the message is also kept in the vault as a text file.
-    /// Returns the sender's destroy-on-receipt flag.
-    pub fn courier_receive(&mut self, input: &[u8]) -> Result<bool, i32> {
+    /// A file is encrypted straight into the vault and never placed in the view buffer.
+    pub fn courier_receive(&mut self, input: &[u8]) -> Result<Received, i32> {
         let authorised = self.take_authorisation();
         self.view = None;
         if self.sess.is_none() {
@@ -1070,6 +1119,14 @@ impl Core {
         };
         // Forward secrecy is committed to disk before anything is shown.
         self.courier_save()?;
+        if let Some(name) = &got.file_name {
+            let sess = self.sess.as_mut().ok_or(-1)?;
+            let mut src: &[u8] = &got.text;
+            self.vault.add_stream(sess, name, &mut src).map_err(|_| -3)?;
+            self.audit(ev::FILE_ENC);
+            self.audit(ev::COURIER_RECV_FILE);
+            return Ok(Received::File);
+        }
         if !got.burn {
             let name = format!("Received message {}.txt", crate::courier_name_stamp(got.created));
             let sess = self.sess.as_mut().ok_or(-1)?;
@@ -1081,7 +1138,7 @@ impl Core {
         buf.write_all(&got.text).map_err(|_| -3)?;
         self.view = Some(buf);
         self.audit_extra(ev::COURIER_RECV, u64::from(got.burn));
-        Ok(got.burn)
+        Ok(if got.burn { Received::BurnMessage } else { Received::KeptMessage })
     }
 
     // ------------------------------------------------------------ audit / login log
@@ -1521,15 +1578,41 @@ mod tests {
         let env = take(&pc);
         assert_eq!(phone.courier_receive(&env), Err(-4), "needs re-authentication");
         assert_eq!(phone.reauth(Some(&pepper2), unix_now()), ReauthOutcome::Ok);
-        assert_eq!(phone.courier_receive(&env), Ok(false));
+        assert_eq!(phone.courier_receive(&env), Ok(Received::KeptMessage));
         assert_eq!(phone.view_bytes().unwrap(), b"keep this");
         assert!(phone.items().iter().any(|i| i.name.starts_with("Received message ")));
         // phone -> PC, destroy on receipt (not stored), raw file form
         phone.courier_send(b"burn this", true, false).unwrap();
         let env2 = take(&phone);
         assert_eq!(pc.reauth(Some(&pepper1), unix_now()), ReauthOutcome::Ok);
-        assert_eq!(pc.courier_receive(&env2), Ok(true));
+        assert_eq!(pc.courier_receive(&env2), Ok(Received::BurnMessage));
         assert!(pc.items().is_empty(), "burn messages are never stored");
+
+        // phone -> PC, a vault file: needs re-authentication, arrives in the PC's vault
+        let doc: Vec<u8> = b"%PDF-1.7 contract".repeat(500);
+        let item = phone.import_bytes("Contract.pdf", &doc, false).unwrap();
+        assert_eq!(phone.courier_send_file(&item.id), Err(-4), "sending a file needs re-authentication");
+        assert_eq!(phone.reauth(Some(&pepper2), unix_now()), ReauthOutcome::Ok);
+        let envf = {
+            phone.courier_send_file(&item.id).unwrap();
+            take(&phone)
+        };
+        assert_eq!(pc.reauth(Some(&pepper1), unix_now()), ReauthOutcome::Ok);
+        assert_eq!(pc.courier_receive(&envf), Ok(Received::File));
+        assert!(pc.view_bytes().is_none(), "a received file is never placed in the viewer");
+        let got = pc.items().iter().find(|i| i.name == "Contract.pdf").cloned().expect("stored in the vault");
+        assert_eq!(pc.reauth(Some(&pepper1), unix_now()), ReauthOutcome::Ok);
+        pc.view_open(&got.id).unwrap();
+        assert_eq!(pc.view_bytes().unwrap(), &doc[..]);
+        pc.view_close();
+        // photos never leave
+        let photo = phone.import_bytes("Photo.jpg", &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3], true).unwrap();
+        let disguised = phone.import_bytes("notes.txt", &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3], false).unwrap();
+        for id in [photo.id, disguised.id] {
+            assert_eq!(phone.reauth(Some(&pepper2), unix_now()), ReauthOutcome::Ok);
+            assert_eq!(phone.courier_send_file(&id), Err(crate::courier::Error::Photo as i32));
+        }
+        assert_eq!(phone.courier_out(), &envf[..], "nothing new sealed");
 
         // state survives lock + login (sealed on disk); replay still refused after reload
         pc.lock(LockReason::Logout);
@@ -1538,7 +1621,7 @@ mod tests {
         pc.push(Field::Pw1, PW);
         pc.push(Field::Code, &code_at(&totp1, t));
         assert_eq!(pc.login(Some(Secret32::from_slice(&pepper1)), t), LoginOutcome::Ok);
-        assert_eq!(pc.courier_status().unwrap(), (true, true, crate::courier::PREKEY_BATCH - 1, crate::courier::PREKEY_BATCH - 1));
+        assert_eq!(pc.courier_status().unwrap(), (true, true, crate::courier::PREKEY_BATCH - 1, crate::courier::PREKEY_BATCH - 2));
         assert_eq!(pc.reauth(Some(&pepper1), unix_now()), ReauthOutcome::Ok);
         assert_eq!(pc.courier_receive(&env2), Err(crate::courier::Error::AlreadyOpened as i32));
         // the state file on disk is ciphertext
@@ -1546,7 +1629,7 @@ mod tests {
         assert!(!raw.windows(5).any(|w| w == b"SCYC\x01"));
         assert!(pc.audit_load() > 0);
         let evs: Vec<String> = (0..).map_while(|i| pc.audit_entry(i).map(|e| e.ev.clone())).collect();
-        for e in [ev::COURIER_BUNDLE, ev::COURIER_PAIR, ev::COURIER_VERIFY, ev::COURIER_SEND, ev::COURIER_RECV, ev::COURIER_REJECT] {
+        for e in [ev::COURIER_BUNDLE, ev::COURIER_PAIR, ev::COURIER_VERIFY, ev::COURIER_SEND, ev::COURIER_RECV, ev::COURIER_REJECT, ev::COURIER_RECV_FILE] {
             assert!(evs.iter().any(|x| x == e), "{e} logged");
         }
         let _ = fs::remove_dir_all(&d1);

@@ -61,6 +61,10 @@ pub mod ev {
     pub const COURIER_SEND: &str = "COURIER_SEND";
     pub const COURIER_RECV: &str = "COURIER_RECV";
     pub const COURIER_REJECT: &str = "COURIER_REJECT";
+    /// A vault file was decrypted and sealed for the paired device.
+    pub const COURIER_SEND_FILE: &str = "COURIER_SEND_FILE";
+    /// A file from the paired device was opened and encrypted into the vault.
+    pub const COURIER_RECV_FILE: &str = "COURIER_RECV_FILE";
     pub const CAPTURE: &str = "CAPTURE";
     pub const CONFIG_CHANGE: &str = "CONFIG_CHANGE";
 }

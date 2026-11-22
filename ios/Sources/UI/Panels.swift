@@ -239,6 +239,8 @@ struct LoginLogView: View {
         case "COURIER_SEND": return e.extra == 1 ? "Courier: message sealed (destroy on receipt)" : "Courier: message sealed"
         case "COURIER_RECV": return e.extra == 1 ? "Courier: message received (destroyed on receipt)" : "Courier: message received (kept)"
         case "COURIER_REJECT": return "Courier: rejected (\(AppModel.courierMessage(Int32(e.extra))))"
+        case "COURIER_SEND_FILE": return "Courier: file sealed for the paired device"
+        case "COURIER_RECV_FILE": return "Courier: file received (encrypted into the vault)"
         case "CONFIG_CHANGE": return "Configuration changed"
         default: return e.event
         }
@@ -418,6 +420,9 @@ struct EncryptedItemView: View {
     @ObservedObject var model: AppModel
     let item: VaultItem
     @State private var confirmDestroy = false
+    @State private var canSend = false
+    @State private var sentFile: URL?
+    @State private var sendNote: (String, Note.Kind)?
 
     var body: some View {
         Panel(title: "ENCRYPTED", close: { model.selected = nil; model.vaultNote = nil; model.touch() }) {
@@ -439,6 +444,7 @@ struct EncryptedItemView: View {
             if let busy = model.busy {
                 HStack(spacing: 10) { ProgressView().tint(Theme.green); Note(text: busy) }
             }
+            if canSend { sendSection }
             Spacer().frame(height: 12)
             if confirmDestroy {
                 Note(text: "Destroy permanently? Key erased. Irreversible.", kind: .error)
@@ -453,6 +459,49 @@ struct EncryptedItemView: View {
                     .font(Theme.small).foregroundStyle(Theme.error)
             }
         }
-        .onAppear { model.vaultNote = nil }
+        .onAppear {
+            model.vaultNote = nil
+            // only files (not photos) and only once a verified device is paired with keys left
+            let s = model.courierStatus()
+            canSend = model.courierCanSend(item) && s?.verified == true && (s?.peerKeys ?? 0) > 0
+        }
+    }
+
+    /// Courier: seal this file for the paired device. Decrypted only inside the core, sealed, wiped.
+    private var sendSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                sendNote = nil
+                sentFile = nil
+                model.courierSendFile(item) { out in
+                    switch out {
+                    case .file(let url):
+                        sentFile = url
+                        sendNote = ("Sealed for the paired device. Email it or save it.", .ok)
+                    case .failed(let message): sendNote = (message, .error)
+                    case .text: break
+                    }
+                }
+            } label: {
+                Label("Send to paired device", systemImage: "paperplane")
+                    .font(Theme.small.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .foregroundStyle(Theme.green)
+                    .background(RoundedRectangle(cornerRadius: 10).stroke(Theme.green, lineWidth: 1.5))
+            }
+            .disabled(model.busy != nil)
+            if let sendNote { Note(text: sendNote.0, kind: sendNote.1) }
+            if let url = sentFile {
+                ShareLink(item: url, preview: SharePreview("Scytale file")) {
+                    Label("Email / save…", systemImage: "square.and.arrow.up")
+                        .font(Theme.small.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .foregroundStyle(Theme.green)
+                        .background(RoundedRectangle(cornerRadius: 10).stroke(Theme.green, lineWidth: 1.5))
+                }
+                Note(text: "Ciphertext only, name sealed inside. Only the paired device can open it.")
+            }
+        }
+        .padding(.top, 8)
     }
 }

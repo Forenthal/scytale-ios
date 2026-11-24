@@ -51,17 +51,4 @@ jobs:
       - name: Unit tests on iPhone simulator
         run: bash scripts/test-sim.sh
 
-  # Known-vulnerability check of every Rust dependency (RustSec advisory database).
-  # Runs on Linux: it needs no Mac, and Linux minutes cost a tenth of macOS minutes.
-  rust-audit:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install cargo-audit (pinned)
-        run: cargo install cargo-audit --locked --version 0.22.2
-      - name: Audit Cargo.lock
-        working-directory: core
-        run: cargo audit --deny warnings
+# Dependency audits (RustSec, cargo-vet) for core/ and windows/ run in supply-chain.yml.

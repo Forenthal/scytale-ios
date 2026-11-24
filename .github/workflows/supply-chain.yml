@@ -1,0 +1,63 @@
+# Dependency checks for both Rust projects (core/ for iPhone, windows/ for Windows).
+# Runs on every push and weekly, so a newly published advisory fails the build even when no code changed.
+name: supply-chain
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The courier protocol is implemented once and copied into both apps. They must never drift.
+  courier-in-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: core/src/courier.rs and windows/src/courier.rs are identical
+        run: cmp core/src/courier.rs windows/src/courier.rs
+
+  # Known vulnerabilities, unsound and unmaintained crates (RustSec advisory database).
+  rust-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [core, windows]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install cargo-audit (pinned)
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Audit ${{ matrix.project }}/Cargo.lock
+        working-directory: ${{ matrix.project }}
+        run: cargo audit --deny warnings
+
+  # Which dependencies have been reviewed by Mozilla, Google, Bytecode Alliance, ISRG or Zcash,
+  # and which have not (listed as exemptions in supply-chain/config.toml). See docs/REVIEW.md.
+  cargo-vet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [core, windows]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install cargo-vet (pinned)
+        run: cargo install cargo-vet --locked --version 0.10.3
+      - name: Vet ${{ matrix.project }}
+        working-directory: ${{ matrix.project }}
+        run: cargo vet --locked
